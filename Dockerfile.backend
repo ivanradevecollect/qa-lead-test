@@ -1,0 +1,59 @@
+# syntax=docker/dockerfile:1
+#
+# Generic backend Dockerfile for restful-booker-platform Java services.
+# Build any module with:  docker build -f Dockerfile.backend --build-arg MODULE=booking -t rbp-booking .
+# (build context must be the repo root)
+
+########################################
+# Stage 1 — Build
+########################################
+FROM maven:3.9-eclipse-temurin-26 AS build
+
+ARG MODULE=booking
+
+WORKDIR /build
+
+# ---- Dependency layer (cached) ----
+# The root POM declares ALL child modules; Maven refuses to build the
+# reactor unless every declared module's POM exists on disk, even with -pl.
+COPY pom.xml ./
+COPY auth/pom.xml ./auth/
+COPY booking/pom.xml ./booking/
+COPY room/pom.xml ./room/
+COPY report/pom.xml ./report/
+COPY branding/pom.xml ./branding/
+COPY message/pom.xml ./message/
+COPY assets/pom.xml ./assets/
+
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -B -pl ${MODULE} -am dependency:go-offline
+
+# ---- Source + compile layer ----
+COPY ${MODULE}/src ./${MODULE}/src
+
+# Tests run in CI as their own stage, not inside image builds.
+RUN --mount=type=cache,target=/root/.m2 \
+    mvn -B -pl ${MODULE} -am clean package -DskipTests
+
+# Normalize the artifact name so the runtime stage doesn't need the ARG
+RUN cp /build/${MODULE}/target/restful-booker-platform-${MODULE}-*-exec.jar /build/app.jar
+
+########################################
+# Stage 2 — Runtime
+########################################
+FROM eclipse-temurin:26-jre-alpine
+
+RUN addgroup -S app && adduser -S app -G app
+USER app
+
+WORKDIR /app
+
+COPY --from=build /build/app.jar ./app.jar
+
+# Service-specific env vars (authDomain, bookingDomain, roomDomain,
+# messageDomain) are injected by docker-compose / the orchestrator.
+ENV profile=prod \
+    JAVA_OPTS="-Xms128m -Xmx384m -XX:MaxMetaspaceSize=96m -XX:+UseContainerSupport"
+
+# HONEYCOMB_API_KEY intentionally has no default — inject at runtime if used.
+ENTRYPOINT ["sh", "-c", "java $JAVA_OPTS -Dspring.profiles.active=$profile -Dhoneycomb.beeline.write-key=${HONEYCOMB_API_KEY} -jar ./app.jar"]

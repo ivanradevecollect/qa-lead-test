@@ -1,0 +1,125 @@
+# Full restful-booker-platform stack, built from source.
+#
+#   docker compose -f docker-compose.build.yml up -d --build
+#   → frontend at http://localhost:8080
+#
+# Place this file and Dockerfile.backend in the repo root.
+# Service hostnames (rbp-auth, rbp-booking, ...) resolve via the shared
+# compose network — they must match the *Domain env vars below and the
+# *_API vars baked into the frontend image.
+
+x-backend-defaults: &backend-defaults
+  restart: unless-stopped
+  environment: &backend-env
+    profile: dev
+    # Optional observability key, injected from your shell / .env file;
+    # empty default keeps tracing disabled without failing startup.
+    HONEYCOMB_API_KEY: ${HONEYCOMB_API_KEY:-}
+    # 64KB header limit (Tomcat default is 8KB): local browsers accumulate
+    # cookies for `localhost` across ALL projects/ports, and the frontend
+    # forwards them, so real-world local requests routinely exceed 8KB.
+    JAVA_OPTS: >-
+      -Xms128m -Xmx384m -XX:MaxMetaspaceSize=96m -XX:+UseContainerSupport
+      -Dserver.max-http-request-header-size=64KB
+
+services:
+  rbp-auth:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: auth }
+    ports:
+      - "3004:3004"
+
+  rbp-booking:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: booking }
+    environment:
+      <<: *backend-env
+      authDomain: rbp-auth
+      messageDomain: rbp-message
+    depends_on:
+      - rbp-auth
+      - rbp-message
+    ports:
+      - "3000:3000"
+
+  rbp-room:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: room }
+    environment:
+      <<: *backend-env
+      authDomain: rbp-auth
+      bookingDomain: rbp-booking
+    depends_on:
+      - rbp-auth
+      - rbp-booking
+    ports:
+      - "3001:3001"
+
+  rbp-branding:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: branding }
+    environment:
+      <<: *backend-env
+      authDomain: rbp-auth
+    depends_on:
+      - rbp-auth
+    ports:
+      - "3002:3002"
+
+  rbp-message:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: message }
+    environment:
+      <<: *backend-env
+      authDomain: rbp-auth
+    ports:
+      - "3006:3006"
+
+  rbp-report:
+    <<: *backend-defaults
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+      args: { MODULE: report }
+    environment:
+      <<: *backend-env
+      roomDomain: rbp-room
+      bookingDomain: rbp-booking
+    depends_on:
+      - rbp-room
+      - rbp-booking
+    ports:
+      - "3005:3005"
+
+  # Frontend: Next.js app with its own (already multi-stage) Dockerfile.
+  # It serves on port 80 inside the container and reaches the backends
+  # via BOOKING_API / AUTH_API / ... env vars whose defaults already
+  # point at the service names above.
+  rbp-assets:
+    build:
+      context: ./assets
+    restart: unless-stopped
+    depends_on:
+      - rbp-auth
+      - rbp-booking
+      - rbp-room
+      - rbp-branding
+      - rbp-message
+      - rbp-report
+    ports:
+      - "8080:80"
